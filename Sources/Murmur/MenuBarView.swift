@@ -9,27 +9,15 @@ struct MenuBarView: View {
             set: { engine.claudeEnabled = $0 }
         ))
         Divider()
+        if AppDelegate.appDelegate?.hasMissingPermissions == true {
+            Button("Setup...") {
+                AppDelegate.appDelegate?.showSetupWizard()
+            }
+            Divider()
+        }
         Button("Quit Murmur") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
-    }
-}
-
-struct SettingsView: View {
-    @EnvironmentObject var engine: DictationEngine
-
-    var body: some View {
-        Form {
-            Text("Murmur")
-                .font(.title2)
-            Text("Hold Fn to dictate")
-            Toggle("Claude polish", isOn: Binding(
-                get: { engine.claudeEnabled },
-                set: { engine.claudeEnabled = $0 }
-            ))
-        }
-        .padding()
-        .frame(width: 300, height: 140)
     }
 }

@@ -1,9 +1,6 @@
 import Foundation
 import Speech
 import AVFoundation
-import os
-
-private let log = Logger(subsystem: "co.shoptrade.murmur", category: "speech")
 
 final class SpeechRecognizerService: @unchecked Sendable {
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -12,14 +9,16 @@ final class SpeechRecognizerService: @unchecked Sendable {
     private let audioEngine = AVAudioEngine()
     private var onFinalResult: ((String) -> Void)?
     private var latestTranscript = ""
+    private(set) var isRunning = false
 
     func startRecognition(onResult: @escaping @Sendable (String) -> Void) {
-        recognitionTask?.cancel()
-        recognitionTask = nil
+        // Stop any previous session cleanly
+        forceStop()
+
         latestTranscript = ""
 
         guard let speechRecognizer, speechRecognizer.isAvailable else {
-            log.error("Speech recognizer not available")
+            NSLog("[Murmur] Speech recognizer not available")
             return
         }
 
@@ -31,7 +30,6 @@ final class SpeechRecognizerService: @unchecked Sendable {
 
         let inputNode = audioEngine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
-        log.info("Audio format: \(recordingFormat.sampleRate)Hz, \(recordingFormat.channelCount)ch")
 
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: recordingFormat) { buffer, _ in
             request.append(buffer)
@@ -40,9 +38,11 @@ final class SpeechRecognizerService: @unchecked Sendable {
         do {
             audioEngine.prepare()
             try audioEngine.start()
-            log.info("Audio engine started")
+            isRunning = true
+            NSLog("[Murmur] Recording started")
         } catch {
-            log.error("Audio engine failed: \(error.localizedDescription)")
+            NSLog("[Murmur] Audio failed: %@", error.localizedDescription)
+            cleanup()
             return
         }
 
@@ -51,51 +51,65 @@ final class SpeechRecognizerService: @unchecked Sendable {
                 let text = result.bestTranscription.formattedString
                 self?.latestTranscript = text
                 onResult(text)
-                log.info("Partial: \(text)")
 
                 if result.isFinal {
-                    log.info("FINAL: \(text)")
-                    self?.onFinalResult?(text)
-                    self?.onFinalResult = nil
-                    self?.cleanup()
+                    NSLog("[Murmur] Final transcript: %@", text)
+                    self?.deliverResult(text)
                 }
             }
             if let error {
-                log.error("Recognition error: \(error.localizedDescription)")
-                if let latest = self?.latestTranscript, !latest.isEmpty {
-                    self?.onFinalResult?(latest)
-                } else {
-                    self?.onFinalResult?("")
-                }
-                self?.onFinalResult = nil
-                self?.cleanup()
+                NSLog("[Murmur] Speech error: %@", error.localizedDescription)
+                self?.deliverResult(self?.latestTranscript ?? "")
             }
         }
     }
 
     func stopRecognition(onComplete: @escaping @Sendable (String) -> Void) {
-        onFinalResult = onComplete
-
-        // Keep mic open 500ms longer so recognizer can finish the last word
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
-            self.audioEngine.stop()
-            self.audioEngine.inputNode.removeTap(onBus: 0)
-            self.recognitionRequest?.endAudio()
-            log.info("Audio stopped after buffer, waiting for final...")
+        guard isRunning else {
+            onComplete(latestTranscript)
+            return
         }
 
-        // Timeout: deliver whatever we have after 2.5s total
+        onFinalResult = onComplete
+
+        // Keep mic open 500ms to catch last word
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.stopAudioEngine()
+        }
+
+        // Timeout after 2.5s
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
             guard let self, self.onFinalResult != nil else { return }
-            log.warning("Timeout — using latest: \(self.latestTranscript)")
-            self.onFinalResult?(self.latestTranscript)
-            self.onFinalResult = nil
-            self.cleanup()
+            NSLog("[Murmur] Timeout, using: %@", self.latestTranscript)
+            self.deliverResult(self.latestTranscript)
         }
     }
 
+    /// Force stop everything immediately (for stuck states)
+    func forceStop() {
+        stopAudioEngine()
+        onFinalResult = nil
+        cleanup()
+    }
+
+    private func stopAudioEngine() {
+        guard isRunning else { return }
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionRequest?.endAudio()
+        isRunning = false
+        NSLog("[Murmur] Mic stopped")
+    }
+
+    private func deliverResult(_ text: String) {
+        let callback = onFinalResult
+        onFinalResult = nil
+        cleanup()
+        callback?(text)
+    }
+
     private func cleanup() {
+        recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest = nil
     }
