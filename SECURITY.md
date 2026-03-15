@@ -12,7 +12,7 @@ If you discover a security vulnerability in Murmur, please report it responsibly
 
 **Do not open a public issue.**
 
-Instead, use GitHub Security Advisories to report privately. Include:
+Instead, use [GitHub Security Advisories](https://github.com/mohammadumifras/murmur/security/advisories/new) to report privately. Include:
 
 1. Description of the vulnerability
 2. Steps to reproduce
