@@ -4,6 +4,16 @@ A lightweight, open source voice dictation app for macOS. Hold the Fn key, speak
 
 Murmur uses Apple Speech for transcription and optionally polishes text with [Claude Code](https://claude.ai/claude-code) in the background.
 
+## Why Murmur
+
+**Free, private, and tiny.** Murmur is a ~400KB native Swift binary that lives in your menu bar. No Electron, no browser engine, no background services eating your RAM. It does one thing well.
+
+**Your voice stays on your Mac.** Speech recognition runs entirely on-device through Apple's Speech Framework. No audio is sent to any server. If you enable the optional Claude polish, only the transcribed text (not audio) is processed.
+
+**Zero setup if you use Claude Code.** Already logged into the Claude CLI? Murmur picks it up automatically. No API keys to configure, no new accounts to create, no subscriptions to manage. Your existing Claude plan powers the intelligent text rewriting.
+
+**Hackable by design.** Every component is a single, focused Swift file. Swap out the speech engine, change the cleanup rules, add your own hotkey. The entire codebase is under 800 lines.
+
 ## How It Works
 
 1. **Hold Fn** to start recording
@@ -14,11 +24,11 @@ Murmur uses Apple Speech for transcription and optionally polishes text with [Cl
 ## Features
 
 - **Fn key activation** via IOKit HID (hardware level, bypasses macOS emoji picker)
-- **Apple Speech Framework** for on-device transcription
-- **Local text cleanup** removes filler words (um, uh), stutters, and fixes spacing
-- **Optional Claude polish** rewrites text with Claude Haiku for grammar and style (requires [Claude Code CLI](https://claude.ai/claude-code))
-- **Smart insertion** re-activates the app you were in before recording and pastes at cursor
-- **Menu bar app** with minimal UI (waveform icon, Claude toggle, quit)
+- **On-device transcription** through Apple Speech Framework. No audio leaves your Mac.
+- **Local text cleanup** removes filler words (um, uh), stutters, and fixes spacing in under 2ms
+- **Optional Claude polish** rewrites text with Claude Haiku for grammar and style. Works with any Claude plan through the [Claude Code CLI](https://claude.ai/claude-code).
+- **Smart insertion** re-activates the app you were in before recording and pastes at your cursor
+- **Minimal footprint** with a clean menu bar UI (waveform icon, Claude toggle, quit)
 
 ## Requirements
 
@@ -31,7 +41,7 @@ Murmur uses Apple Speech for transcription and optionally polishes text with [Cl
 ## Build
 
 ```bash
-git clone https://github.com/shoptrade/murmur.git
+git clone https://github.com/mohammadumifras/murmur.git
 cd murmur
 swift build
 ```
