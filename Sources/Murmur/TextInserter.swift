@@ -1,10 +1,12 @@
 import Foundation
 import AppKit
 import Carbon.HIToolbox
+import ApplicationServices
 
 final class TextInserter: @unchecked Sendable {
     private var savedApp: NSRunningApplication?
     private var savedPID: pid_t = 0
+    private var lastInsertedLength: Int = 0
 
     func saveTargetApp() {
         savedApp = NSWorkspace.shared.frontmostApplication
@@ -16,15 +18,14 @@ final class TextInserter: @unchecked Sendable {
     }
 
     func insert(text: String) {
-        // Set clipboard
+        lastInsertedLength = text.count
+
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
 
-        // Make sure target app is active
         activateAndWait()
-
-        usleep(20_000) // 20ms settle
+        usleep(50_000)
         simulateKey(kVK_ANSI_V, flags: .maskCommand)
     }
 
@@ -35,18 +36,24 @@ final class TextInserter: @unchecked Sendable {
         }
 
         activateAndWait()
+        usleep(50_000)
 
-        // Undo previous paste
-        simulateKey(kVK_ANSI_Z, flags: .maskCommand)
-        usleep(80_000) // 80ms for undo
+        // Select the previously pasted text by pressing Shift+Left arrow N times
+        // This is more reliable than Cmd+Z across different apps
+        for _ in 0..<lastInsertedLength {
+            simulateKey(kVK_LeftArrow, flags: [.maskShift])
+            usleep(2_000) // 2ms between keystrokes
+        }
+        usleep(30_000)
 
-        // Set new text and paste
+        // Now paste the new text over the selection
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(newText, forType: .string)
-        usleep(20_000) // 20ms
+        usleep(30_000)
         simulateKey(kVK_ANSI_V, flags: .maskCommand)
-        usleep(50_000) // 50ms
+
+        lastInsertedLength = newText.count
     }
 
     private func activateAndWait() {
@@ -54,7 +61,6 @@ final class TextInserter: @unchecked Sendable {
         if app.isActive { return }
 
         app.activate()
-        // Wait until active (poll every 10ms, max 300ms)
         for _ in 0..<30 {
             if app.isActive { return }
             usleep(10_000)

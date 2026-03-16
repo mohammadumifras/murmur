@@ -66,8 +66,7 @@ final class DictationEngine: ObservableObject {
         isRecording = true
         statusMessage = "Listening..."
 
-        // Play start sound
-        NSSound(named: "Tink")?.play()
+        playSound("Tink")
 
         speechRecognizer.startRecognition { [weak self] transcript in
             Task { @MainActor in
@@ -100,8 +99,7 @@ final class DictationEngine: ObservableObject {
         statusMessage = "Processing..."
         NSLog("[Murmur] Recording duration: %.1fs", duration)
 
-        // Play stop sound
-        NSSound(named: "Pop")?.play()
+        playSound("Pop")
 
         speechRecognizer.stopRecognition { [weak self] finalTranscript in
             Task { @MainActor in
@@ -156,6 +154,16 @@ final class DictationEngine: ObservableObject {
                     await MainActor.run { self.isProcessing = false }
                 }
             }
+        }
+    }
+
+    private func playSound(_ name: String) {
+        let path = "/System/Library/Sounds/\(name).aiff"
+        Task.detached {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+            proc.arguments = [path]
+            try? proc.run()
         }
     }
 }

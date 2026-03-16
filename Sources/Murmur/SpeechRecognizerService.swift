@@ -10,12 +10,13 @@ final class SpeechRecognizerService: @unchecked Sendable {
     private var onFinalResult: ((String) -> Void)?
     private var latestTranscript = ""
     private(set) var isRunning = false
+    private var delivered = false
 
     func startRecognition(onResult: @escaping @Sendable (String) -> Void) {
-        // Stop any previous session cleanly
         forceStop()
 
         latestTranscript = ""
+        delivered = false
 
         guard let speechRecognizer, speechRecognizer.isAvailable else {
             NSLog("[Murmur] Speech recognizer not available")
@@ -47,19 +48,24 @@ final class SpeechRecognizerService: @unchecked Sendable {
         }
 
         recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self else { return }
             if let result {
                 let text = result.bestTranscription.formattedString
-                self?.latestTranscript = text
+                self.latestTranscript = text
                 onResult(text)
 
                 if result.isFinal {
                     NSLog("[Murmur] Final transcript: %@", text)
-                    self?.deliverResult(text)
+                    DispatchQueue.main.async {
+                        self.deliverResult(text)
+                    }
                 }
             }
             if let error {
                 NSLog("[Murmur] Speech error: %@", error.localizedDescription)
-                self?.deliverResult(self?.latestTranscript ?? "")
+                DispatchQueue.main.async {
+                    self.deliverResult(self.latestTranscript)
+                }
             }
         }
     }
@@ -85,10 +91,10 @@ final class SpeechRecognizerService: @unchecked Sendable {
         }
     }
 
-    /// Force stop everything immediately (for stuck states)
     func forceStop() {
         stopAudioEngine()
         onFinalResult = nil
+        delivered = false
         cleanup()
     }
 
@@ -101,7 +107,10 @@ final class SpeechRecognizerService: @unchecked Sendable {
         NSLog("[Murmur] Mic stopped")
     }
 
+    // All calls to deliverResult are dispatched to main queue, so no race
     private func deliverResult(_ text: String) {
+        guard !delivered else { return }
+        delivered = true
         let callback = onFinalResult
         onFinalResult = nil
         cleanup()
