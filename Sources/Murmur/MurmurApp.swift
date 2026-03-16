@@ -1,8 +1,6 @@
 import SwiftUI
 import Combine
 import ApplicationServices
-import IOKit
-import IOKit.hid
 import AVFoundation
 import Speech
 
@@ -22,28 +20,26 @@ struct MurmurApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, @unchecked Sendable {
     let dictationEngine = DictationEngine()
     @Published var isRecording = false
-    private var hidManager: IOHIDManager?
     private var cancellables = Set<AnyCancellable>()
     private var setupWindow: NSWindow?
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
 
-    static var isHolding = false
-    static var engine: DictationEngine?
     static var appDelegate: AppDelegate?
+    private static var fnHeld = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         dictationEngine.$isRecording
             .receive(on: DispatchQueue.main)
             .assign(to: &$isRecording)
 
-        AppDelegate.engine = dictationEngine
         AppDelegate.appDelegate = self
 
-        setupHIDMonitoring()
+        setupFnEventTap()
         dictationEngine.requestPermissions()
 
         NSLog("[Murmur] Ready. Hold Fn to record, release to stop.")
 
-        // Show wizard only on first install
         if !UserDefaults.standard.bool(forKey: "setupComplete") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 self.showSetupWizard()
@@ -52,12 +48,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, @unc
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let mgr = hidManager {
-            IOHIDManagerClose(mgr, IOOptionBits(kIOHIDOptionsTypeNone))
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            if let source = runLoopSource {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            }
+            CFMachPortInvalidate(tap)
         }
     }
 
-    // MARK: - Setup Wizard (created on demand, freed when closed)
+    // MARK: - Setup Wizard
 
     func showSetupWizard() {
         if let existing = setupWindow, existing.isVisible {
@@ -88,77 +88,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject, @unc
         setupWindow = window
     }
 
-    /// Check if any permissions are missing
     var hasMissingPermissions: Bool {
         let mic = AVCaptureDevice.authorizationStatus(for: .audio) != .authorized
         let speech = SFSpeechRecognizer.authorizationStatus() != .authorized
         let ax = !AXIsProcessTrusted()
-        let input = !UserDefaults.standard.bool(forKey: "inputMonitoringGranted")
         let fn = (UserDefaults.standard.persistentDomain(forName: "com.apple.HIToolbox")?["AppleFnUsageType"] as? Int) != 0
-        return mic || speech || ax || input || fn
+        return mic || speech || ax || fn
     }
 
-    func markFnReceived() {
-        if !UserDefaults.standard.bool(forKey: "inputMonitoringGranted") {
-            UserDefaults.standard.set(true, forKey: "inputMonitoringGranted")
-            NSLog("[Murmur] Input Monitoring confirmed working")
+    // MARK: - Fn Key via CGEvent Tap
+
+    private func setupFnEventTap() {
+        // Check and request Accessibility (needed for paste)
+        if !AXIsProcessTrusted() {
+            NSLog("[Murmur] Requesting Accessibility access...")
+            let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
+            AXIsProcessTrustedWithOptions(options)
         }
-    }
 
-    // MARK: - HID Monitoring
+        // Check and request Input Monitoring (needed for key detection)
+        if !CGPreflightListenEventAccess() {
+            NSLog("[Murmur] Requesting Input Monitoring access...")
+            CGRequestListenEventAccess()
+            // Retry after a delay in case user grants quickly
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.setupFnEventTap()
+            }
+            return
+        }
 
-    private func setupHIDMonitoring() {
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
 
-        let matching: [String: Any] = [
-            kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop,
-            kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard
-        ]
-        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
-
-        let callback: IOHIDValueCallback = { context, result, sender, value in
-            let element = IOHIDValueGetElement(value)
-            let usagePage = IOHIDElementGetUsagePage(element)
-            let usage = IOHIDElementGetUsage(element)
-            let pressed = IOHIDValueGetIntegerValue(value)
-
-            let isFnKey = (usagePage == 0xFF && usage == 0x03) || (usagePage == 0x07 && usage == 0x03)
-            guard isFnKey else { return }
-
-            Task { @MainActor in
-                AppDelegate.appDelegate?.markFnReceived()
+        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                if let refcon, let tap = Unmanaged<AnyObject>.fromOpaque(refcon).takeUnretainedValue() as? NSValue {
+                    let pointer = tap.pointerValue!
+                    let machPort = Unmanaged<CFMachPort>.fromOpaque(pointer).takeUnretainedValue()
+                    CGEvent.tapEnable(tap: machPort, enable: true)
+                }
+                return Unmanaged.passRetained(event)
             }
 
-            if pressed != 0 {
-                if !AppDelegate.isHolding {
-                    AppDelegate.isHolding = true
-                    NSLog("[Murmur] Fn PRESSED")
-                    Task { @MainActor in
-                        AppDelegate.engine?.startRecording()
-                    }
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            guard keyCode == 63 else { return Unmanaged.passRetained(event) }
+
+            let fnDown = event.flags.contains(.maskSecondaryFn)
+
+            if fnDown && !AppDelegate.fnHeld {
+                AppDelegate.fnHeld = true
+                NSLog("[Murmur] Fn PRESSED")
+                Task { @MainActor in
+                    AppDelegate.appDelegate?.dictationEngine.startRecording()
                 }
-            } else {
-                if AppDelegate.isHolding {
-                    AppDelegate.isHolding = false
-                    NSLog("[Murmur] Fn RELEASED")
-                    Task { @MainActor in
-                        AppDelegate.engine?.stopRecording()
-                    }
+            } else if !fnDown && AppDelegate.fnHeld {
+                AppDelegate.fnHeld = false
+                NSLog("[Murmur] Fn RELEASED")
+                Task { @MainActor in
+                    AppDelegate.appDelegate?.dictationEngine.stopRecording()
                 }
             }
+
+            return Unmanaged.passRetained(event)
         }
 
-        IOHIDManagerRegisterInputValueCallback(manager, callback, nil)
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-
-        let result = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        if result == kIOReturnSuccess {
-            NSLog("[Murmur] HID keyboard monitor installed")
-        } else {
-            NSLog("[Murmur] ERROR: HID manager failed (code: %d)", result)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: eventMask,
+            callback: callback,
+            userInfo: nil
+        ) else {
+            NSLog("[Murmur] ERROR: Failed to create event tap")
+            return
         }
 
-        self.hidManager = manager
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+
+        self.eventTap = tap
+        self.runLoopSource = source
+
+        NSLog("[Murmur] Fn key event tap installed")
     }
 }
 
